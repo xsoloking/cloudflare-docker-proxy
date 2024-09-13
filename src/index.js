@@ -3,7 +3,7 @@ addEventListener("fetch", (event) => {
   event.respondWith(handleRequest(event.request));
 });
 
-const dockerHub = "https://registry-1.docker.io";
+const DOCKER_HUB = "https://registry-1.docker.io";
 
 const routes = {
   // production
@@ -19,69 +19,77 @@ const routes = {
   "docker-staging.byai.uk": dockerHub,
 };
 
-function routeByHosts(host) {
-  if (host in routes) {
-    return routes[host];
-  }
-  if (MODE == "debug") {
-    return TARGET_UPSTREAM;
-  }
-  return "";
+async function handleRequest(request) {
+  const handler = new RequestHandler(request)
+  return handler.start()
 }
 
-async function handleRequest(request) {
-  const url = new URL(request.url);
-  const upstream = routeByHosts(url.hostname);
-  if (upstream === "") {
-    return new Response(
-      JSON.stringify({
-        routes: routes,
-      }),
-      {
-        status: 404,
-      }
-    );
-  }
-  const isDockerHub = upstream == dockerHub;
-  const authorization = request.headers.get("Authorization");
-  if (url.pathname == "/v2/") {
-    const newUrl = new URL(upstream + "/v2/");
-    const headers = new Headers();
-    if (authorization) {
-      headers.set("Authorization", authorization);
+const AUTHORIZE_PATH = "/v2/auth";
+
+class RequestHandler {
+  request;
+  url;
+  upstream;
+  constructor(request) {
+    this.request = request;
+    this.url = new URL(request.url)
+    this.upstream = getUpstream(this.url.hostname)
+    if (!this.upstream) {
+      throw new Error('未找到映射的 upstream 配置项')
     }
-    // check if need to authenticate
-    const resp = await fetch(newUrl.toString(), {
-      method: "GET",
-      headers: headers,
+  }
+
+  get isDockerHub() {
+    this.upstream === DOCKER_HUB;
+  }
+
+  start() {
+    if (this.url.pathname === AUTHORIZE_PATH) {
+      return this.authorize()
+    }
+    // 处理默认的 library 命名空间
+    // Example: /v2/busybox/manifests/latest => /v2/library/busybox/manifests/latest
+    if (this.isDockerHub) {
+      const pathParts = url.pathname.split("/");
+      if (pathParts.length == 5) {
+        pathParts.splice(2, 0, "library");
+        const redirectUrl = new URL(url);
+        redirectUrl.pathname = pathParts.join("/");
+        return Response.redirect(redirectUrl, 301);
+      }
+    }
+    // 代理原始请求
+    return this.forwardRequest()
+  }
+
+  async forwardRequest() {
+    const newUrl = new URL(this.upstream + this.url.pathname);
+    const newReq = new Request(newUrl, {
+      method: this.request.method,
+      headers: this.request.headers,
       redirect: "follow",
     });
+    const resp = await fetch(newReq);
     if (resp.status === 401) {
-      if (MODE == "debug") {
-        headers.set(
-          "Www-Authenticate",
-          `Bearer realm="http://${url.host}/v2/auth",service="cloudflare-docker-proxy"`
-        );
-      } else {
-        headers.set(
-          "Www-Authenticate",
-          `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
-        );
-      }
-      return new Response(JSON.stringify({ message: "UNAUTHORIZED" }), {
-        status: 401,
-        headers: headers,
-      });
-    } else {
-      return resp;
+      const newResp = new Response(resp.body, resp);
+      newResp.headers.set(
+        "Www-Authenticate",
+        `Bearer realm="${this.url.protocol}//${this.url.host}${AUTHORIZE_PATH}",service="cloudflare-docker-proxy"`
+      );
+      return newResp;
     }
+    return resp;
   }
-  // get token
-  if (url.pathname == "/v2/auth") {
-    const newUrl = new URL(upstream + "/v2/");
-    const resp = await fetch(newUrl.toString(), {
+
+  async authorize() {
+    const authorization = this.request.headers.get("Authorization");
+    const newUrl = new URL(this.upstream + "/v2/");
+    const resp = await fetch(newUrl, {
       method: "GET",
       redirect: "follow",
+      headers: {
+        Authorization: authorization
+      }
     });
     if (resp.status !== 401) {
       return resp;
@@ -91,37 +99,21 @@ async function handleRequest(request) {
       return resp;
     }
     const wwwAuthenticate = parseAuthenticate(authenticateStr);
-    let scope = url.searchParams.get("scope");
+    const scope = this.url.searchParams.get("scope");
     // autocomplete repo part into scope for DockerHub library images
     // Example: repository:busybox:pull => repository:library/busybox:pull
-    if (scope && isDockerHub) {
-      let scopeParts = scope.split(":");
-      if (scopeParts.length == 3 && !scopeParts[1].includes("/")) {
-        scopeParts[1] = "library/" + scopeParts[1];
-        scope = scopeParts.join(":");
-      }
-    }
-    return await fetchToken(wwwAuthenticate, scope, authorization);
+    return fetchToken(wwwAuthenticate, scope, authorization);
   }
-  // redirect for DockerHub library images
-  // Example: /v2/busybox/manifests/latest => /v2/library/busybox/manifests/latest
-  if (isDockerHub) {
-    const pathParts = url.pathname.split("/");
-    if (pathParts.length == 5) {
-      pathParts.splice(2, 0, "library");
-      const redirectUrl = new URL(url);
-      redirectUrl.pathname = pathParts.join("/");
-      return Response.redirect(redirectUrl, 301);
-    }
+}
+
+function getUpstream(host) {
+  if (host in routes) {
+    return routes[host];
   }
-  // foward requests
-  const newUrl = new URL(upstream + url.pathname);
-  const newReq = new Request(newUrl, {
-    method: request.method,
-    headers: request.headers,
-    redirect: "follow",
-  });
-  return await fetch(newReq);
+  if (MODE == "debug") {
+    return TARGET_UPSTREAM;
+  }
+  return "";
 }
 
 function parseAuthenticate(authenticateStr) {
@@ -152,3 +144,4 @@ async function fetchToken(wwwAuthenticate, scope, authorization) {
   }
   return await fetch(url, { method: "GET", headers: headers });
 }
+
