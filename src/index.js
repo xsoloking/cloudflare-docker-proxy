@@ -7,7 +7,7 @@ const DOCKER_HUB = "https://registry-1.docker.io";
 
 const routes = {
   // production
-  "docker.byai.uk": dockerHub,
+  "docker.byai.uk": DOCKER_HUB,
   "quay.byai.uk": "https://quay.io",
   "gcr.byai.uk": "https://gcr.io",
   "k8s-gcr.byai.uk": "https://k8s.gcr.io",
@@ -16,7 +16,7 @@ const routes = {
   "cloudsmith.byai.uk": "https://docker.cloudsmith.io",
 
   // staging
-  "docker-staging.byai.uk": dockerHub,
+  "docker-staging.byai.uk": DOCKER_HUB,
 };
 
 async function handleRequest(request) {
